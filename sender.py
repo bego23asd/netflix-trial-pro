@@ -11,6 +11,10 @@ from flask_cors import CORS
 
 URL = "https://web.prod.cloud.netflix.com/graphql"
 
+# One-per-process request IDs, mirroring the classic standalone flow.
+REQ_ID = str(uuid.uuid4())
+TOP_UUID = str(uuid.uuid4())
+
 NFVDID_VALUE = "BQFmAAEBEDfQY0dAGiJZuocAfFU2CQpAYdUwSM-D1OYmnErF2ElCBLm3CS95c_ywNg2ALWYqpR11S7Q7F8GGn_WlsEleYshSjx9uKQE-KVY35tPLE1ZtgQ%3D%3D"
 
 RECAPTCHA_SITE_KEY = "6LdqW_EqAAAAAO87Fb_kcZfNzs0IqJRcKiJDYpUv"
@@ -101,8 +105,8 @@ def make_headers():
         "Origin": "https://www.netflix.com",
         "Referer": "https://www.netflix.com/",
         "Accept-Language": "en-US,en;q=0.9",
-        "x-netflix.request.id": str(uuid.uuid4()),
-        "x-netflix.request.toplevel.uuid": str(uuid.uuid4()),
+        "x-netflix.request.id": REQ_ID,
+        "x-netflix.request.toplevel.uuid": TOP_UUID,
         "x-netflix.request.clcs.bucket": "high",
         "x-netflix.context.form-factor": "phone",
         "x-netflix.context.app-version": "v38c5b0da",
@@ -167,6 +171,15 @@ def parse_cookie_input(raw):
     return cookies
 
 
+def generate_cookie(nfvdid, flwssn):
+    """
+    Build the cookie header purely from known values — exactly the classic
+    standalone flow. Netflix's guest/CLCS flow mainly needs 'nfvdid'
+    (device id) and 'flwssn' (flow session); no browser/page load needed.
+    """
+    return f"nfvdid={nfvdid}; flwssn={flwssn}"
+
+
 def build_cookie_header(cookies, flwssn):
     """
     Merge the injected cookies with a fresh flwssn and output the Cookie
@@ -207,8 +220,8 @@ async def _send(email, cookie_input=None):
     # variables always describe the same guest flow session.
     flwssn = cookies.get("flwssn") or str(uuid.uuid4())
     headers = make_headers()
-    # Inject the pasted cookie (cookie-editor-style) into every request.
-    headers["Cookie"] = build_cookie_header(cookies, flwssn)
+    # Inject the nfvdid (cookie-editor style) BEFORE any payload is sent.
+    headers["Cookie"] = generate_cookie(cookies.get("nfvdid", NFVDID_VALUE), flwssn)
     payload1, payload2 = make_payloads(email, flwssn)
 
     client_kwargs = {"timeout": 30}
