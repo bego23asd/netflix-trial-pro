@@ -8,6 +8,17 @@ app = Flask(__name__)
 CORS(app)
 
 
+@app.route("/")
+def home():
+    return jsonify(
+        {
+            "service": "netflix-trial-backend",
+            "health": "/healthz",
+            "send": "POST /api/send with JSON body {email}",
+        }
+    )
+
+
 @app.route("/healthz")
 def healthz():
     return jsonify({"status": "ok"})
