@@ -1,0 +1,15 @@
+[
+{
+"domain": ".netflix.com",
+"expirationDate": 1815118990.274967,
+"hostOnly": false,
+"httpOnly": false,
+"name": "nfvdid",
+"path": "/",
+"sameSite": null,
+"secure": false,
+"session": false,
+"storeId": null,
+"value": "BQFmAAEBEDfQY0dAGiJZuocAfFU2CQpAYdUwSM-D1OYmnErF2ElCBLm3CS95c_ywNg2ALWYqpR11S7Q7F8GGn_WlsEleYshSjx9uKQE-KVY35tPLE1ZtgQ%3D%3D"
+}
+]
