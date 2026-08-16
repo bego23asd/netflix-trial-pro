@@ -151,6 +151,11 @@ def build_cookie_header(cookies, flwssn):
     return "; ".join(f"{name}={value}" for name, value in merged.items())
 
 
+def _snippet(text, limit=300):
+    """First chars of Netflix's raw response, for surfacing real failures."""
+    return (text or "").strip().replace("\n", " ")[:limit]
+
+
 async def _send(email, cookie_input=None):
     """Run the two GraphQL posts. Returns (ok, message)."""
     cookies = parse_cookie_input(cookie_input)
@@ -164,13 +169,19 @@ async def _send(email, cookie_input=None):
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp1 = await client.post(URL, json=payload1, headers=headers)
-        if '"errors"' in resp1.text.lower():
-            return False, "Netflix rejected the first request (init signup)."
+        if resp1.status_code != 200 or '"errors"' in resp1.text.lower():
+            return False, (
+                f"Netflix rejected payload 1 (HTTP {resp1.status_code}): "
+                f"{_snippet(resp1.text)}"
+            )
 
         resp2 = await client.post(URL, json=payload2, headers=headers)
         if resp2.status_code == 200 and '"errors"' not in resp2.text.lower():
             return True, "Successfully sent 30 days trial for your email."
-        return False, f"Second request failed (HTTP {resp2.status_code})."
+        return False, (
+            f"Second request failed (HTTP {resp2.status_code}): "
+            f"{_snippet(resp2.text)}"
+        )
 
 
 def send_trial(email, cookie_input=None):
