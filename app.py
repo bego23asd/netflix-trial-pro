@@ -28,7 +28,10 @@ def healthz():
 def api_send():
     data = request.get_json(silent=True) or {}
     email = data.get("email", "")
-    ok, message = sender.send_trial(email)
+    # Cookie from the frontend "cookie editor" — can be a bare nfvdid value,
+    # a Cookie header line, or the JSON array exported by a cookie editor.
+    cookie_input = data.get("cookie") or data.get("nfvdid") or data.get("cookieJson")
+    ok, message = sender.send_trial(email, cookie_input)
     return jsonify({"ok": ok, "message": message})
 
 
