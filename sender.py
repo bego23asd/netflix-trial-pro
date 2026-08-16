@@ -191,7 +191,27 @@ def send_trial(email, cookie_input=None):
         return False, f"Error while sending trial: {exc}"
 
 
-if __name__ == "__main__":
+def _run_cli():
+    """Direct-run flow, mirroring the classic standalone script exactly."""
+    print("\n   [ NETFLIX TRIAL SENDER ]")
+    print("          by Lyco\n")
+
     email = input("Enter your email address: ").strip()
-    ok, message = send_trial(email)
-    print(message)
+    while not email or "@" not in email:
+        email = input("Invalid email. Please enter a valid email address: ").strip()
+
+    cookie_raw = (
+        input("nfvdid cookie to inject (Enter to use the built-in): ").strip() or None
+    )
+    if cookie_raw:
+        if "nfvdid" not in parse_cookie_input(cookie_raw):
+            print("Could not read nfvdid from that input — using the built-in one.")
+            cookie_raw = None
+
+    ok, message = send_trial(email, cookie_raw)
+    print(message if ok else f"Failed: {message}")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_run_cli())
