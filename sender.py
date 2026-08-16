@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import uuid
 
 import httpx
@@ -9,6 +10,19 @@ URL = "https://web.prod.cloud.netflix.com/graphql"
 NFVDID_VALUE = "BQFmAAEBEDfQY0dAGiJZuocAfFU2CQpAYdUwSM-D1OYmnErF2ElCBLm3CS95c_ywNg2ALWYqpR11S7Q7F8GGn_WlsEleYshSjx9uKQE-KVY35tPLE1ZtgQ%3D%3D"
 
 RECAPTCHA_SITE_KEY = "6LdqW_EqAAAAAO87Fb_kcZfNzs0IqJRcKiJDYpUv"
+
+# Optional cookie.txt next to this file — drop your cookie-export JSON array or
+# the bare nfvdid value there and it is used VERBATIM (no transcription risk).
+COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookie.txt")
+
+
+def _load_cookie_file():
+    """Read cookie.txt (if present): raw JSON array, Cookie line, or bare value."""
+    try:
+        with open(COOKIE_FILE, "r", encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
 
 
 def make_payloads(email, flwssn):
@@ -113,6 +127,9 @@ def parse_cookie_input(raw):
     fails to parse falls back to the hardcoded NFVDID_VALUE constant.
     """
     raw = (raw or "").strip()
+    if not raw:
+        raw = _load_cookie_file() or ""
+        raw = raw.strip()
     cookies = {}
 
     if not raw:
@@ -151,6 +168,24 @@ def build_cookie_header(cookies, flwssn):
     return "; ".join(f"{name}={value}" for name, value in merged.items())
 
 
+def _proxy_url():
+    """
+    Optional egress proxy for hosted deploys.
+
+    Netflix decides the plan country (e.g. US$ 8.99 vs PHP 169/month + free
+    trial) from the IP that the GraphQL request comes from. When the backend
+    runs on a datacenter (Render), that IP is usually geolocated to the US,
+    so the trial country comes out wrong. Point TRIAL_PROXY (or the standard
+    HTTPS_PROXY) at a proxy/VPN in your own country to make the hosted site
+    behave exactly like the CLI running on your PC.
+    """
+    for name in ("TRIAL_PROXY", "HTTPS_PROXY", "https_proxy"):
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
 def _snippet(text, limit=300):
     """First chars of Netflix's raw response, for surfacing real failures."""
     return (text or "").strip().replace("\n", " ")[:limit]
@@ -167,7 +202,12 @@ async def _send(email, cookie_input=None):
     headers["Cookie"] = build_cookie_header(cookies, flwssn)
     payload1, payload2 = make_payloads(email, flwssn)
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    client_kwargs = {"timeout": 30}
+    proxy = _proxy_url()
+    if proxy:
+        client_kwargs["proxy"] = proxy
+
+    async with httpx.AsyncClient(**client_kwargs) as client:
         resp1 = await client.post(URL, json=payload1, headers=headers)
         if resp1.status_code != 200 or '"errors"' in resp1.text.lower():
             return False, (
