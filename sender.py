@@ -1,9 +1,13 @@
+import argparse
 import asyncio
 import json
 import os
 import uuid
 
 import httpx
+
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
 URL = "https://web.prod.cloud.netflix.com/graphql"
 
@@ -14,6 +18,11 @@ RECAPTCHA_SITE_KEY = "6LdqW_EqAAAAAO87Fb_kcZfNzs0IqJRcKiJDYpUv"
 # Optional cookie.txt next to this file — drop your cookie-export JSON array or
 # the bare nfvdid value there and it is used VERBATIM (no transcription risk).
 COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookie.txt")
+
+# Merged web API (from app.py) — the Flask app that Render serves via gunicorn.
+app = Flask(__name__)
+# Allow the Vercel frontend to call this API cross-origin.
+CORS(app)
 
 
 def _load_cookie_file():
@@ -242,27 +251,102 @@ def send_trial(email, cookie_input=None):
         return False, f"Error while sending trial: {exc}"
 
 
+# ---- Web API routes (merged from app.py) --------------------------
+@app.route("/")
+def home():
+    return jsonify(
+        {
+            "service": "netflix-trial-backend",
+            "health": "/healthz",
+            "send": "POST /api/send with JSON body {email[, cookie]}",
+        }
+    )
+
+
+@app.route("/healthz")
+def healthz():
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/send", methods=["POST"])
+def api_send():
+    data = request.get_json(silent=True) or {}
+    email = data.get("email", "")
+    # Cookie from the frontend "cookie editor" — bare nfvdid value, a Cookie
+    # header line, or the JSON array exported by a cookie editor.
+    cookie_input = data.get("cookie") or data.get("nfvdid") or data.get("cookieJson")
+    ok, message = send_trial(email, cookie_input)
+    return jsonify({"ok": ok, "message": message})
+
+
+def _build_args():
+    parser = argparse.ArgumentParser(
+        description="Netflix trial sender — also powers the /api/send web route."
+    )
+    parser.add_argument(
+        "--email",
+        help="Email address (default: TRIAL_EMAIL env var, or interactive prompt)",
+    )
+    parser.add_argument(
+        "--cookie",
+        help="nfvdid — bare value, Cookie line, or cookie-editor JSON export",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Only print the Cookie header that would be attached; do not call Netflix",
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Start the merged Flask web API on http://127.0.0.1:5000",
+    )
+    return parser.parse_args()
+
+
 def _run_cli():
-    """Direct-run flow, mirroring the classic standalone script exactly."""
+    """Merge the classic standalone flow into this single file."""
     print("\n   [ NETFLIX TRIAL SENDER ]")
     print("          by Lyco\n")
 
-    email = input("Enter your email address: ").strip()
-    while not email or "@" not in email:
-        email = input("Invalid email. Please enter a valid email address: ").strip()
+    args = _build_args()
 
-    cookie_raw = (
-        input("nfvdid cookie to inject (Enter to use the built-in): ").strip() or None
-    )
+    email = (args.email or os.getenv("TRIAL_EMAIL") or "").strip()
+    while not email or "@" not in email:
+        email = input("Enter your email address: ").strip()
+
+    cookie_raw = (args.cookie or os.getenv("TRIAL_COOKIE") or "").strip() or None
+
     if cookie_raw:
         if "nfvdid" not in parse_cookie_input(cookie_raw):
-            print("Could not read nfvdid from that input — using the built-in one.")
-            cookie_raw = None
+            print(
+                "Could not read nfvdid from that input. Paste a bare value, a "
+                "Cookie line (nfvdid=...), or the cookie-editor JSON export."
+            )
+            return 2
+        print("Using the nfvdid cookie you provided (injected into every request).")
+    elif _load_cookie_file():
+        print("Using nfvdid from cookie.txt (used VERBATIM, exactly as saved).")
+    else:
+        print("No --cookie / cookie.txt — using the built-in default nfvdid.")
+
+    if args.dry_run:
+        flwssn = str(uuid.uuid4())
+        cookies_used = parse_cookie_input(cookie_raw)
+        print("\n[DRY RUN] Cookie header that would be attached:")
+        print("  " + build_cookie_header(cookies_used, flwssn))
+        print("[DRY RUN] Nothing was sent.")
+        return 0
 
     ok, message = send_trial(email, cookie_raw)
-    print(message if ok else f"Failed: {message}")
+    print(message if ok else "Failed: " + message)
     return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(_run_cli())
+    args = _build_args()
+    if args.serve:
+        print("Serving the merged website API at http://127.0.0.1:5000")
+        app.run(host="0.0.0.0", port=5000)
+    else:
+        raise SystemExit(_run_cli())
