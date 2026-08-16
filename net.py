@@ -213,15 +213,89 @@ def _snippet(text, limit=300):
     return (text or "").strip().replace("\n", " ")[:limit]
 
 
+def _playwright_enabled():
+    """
+    Playwright cookie harvesting is used when available; the classic baked
+    nfvdid path is the always-on fallback. Set TRIAL_HARVEST=0 to disable.
+    """
+    if os.getenv("TRIAL_HARVEST", "").strip().lower() in ("0", "false", "off", "no"):
+        return False
+    try:
+        import playwright  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+async def _harvest_real_cookie(nfvdid):
+    """
+    Updated example flow: open a real (headless) Netflix page with our nfvdid
+    pre-seeded, let it generate fresh session cookies (flwssn, mem/fcb, etc),
+    then return them as a Cookie header string. Raises on failure so the
+    caller can fall back to the baked-in cookie.
+    """
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(
+                user_agent=make_headers()["User-Agent"],
+                viewport={"width": 393, "height": 852},
+                is_mobile=True,
+                has_touch=True,
+            )
+            await context.add_cookies(
+                [
+                    {
+                        "name": "nfvdid",
+                        "value": nfvdid,
+                        "domain": ".netflix.com",
+                        "path": "/",
+                    }
+                ]
+            )
+            page = await context.new_page()
+            await page.goto(
+                "https://www.netflix.com/in/",
+                wait_until="domcontentloaded",
+                timeout=20000,
+            )
+            await page.wait_for_timeout(4000)
+            raw = await context.cookies()
+            return "; ".join(f"{c['name']}={c['value']}" for c in raw)
+        finally:
+            await browser.close()
+
+
 async def _send(email, cookie_input=None):
     """Run the two GraphQL posts. Returns (ok, message)."""
     cookies = parse_cookie_input(cookie_input)
+    nfvdid = cookies.get("nfvdid", NFVDID_VALUE)
     # Use the pasted flwssn when present so the cookie and the GraphQL
     # variables always describe the same guest flow session.
     flwssn = cookies.get("flwssn") or str(uuid.uuid4())
     headers = make_headers()
-    # Inject the nfvdid (cookie-editor style) BEFORE any payload is sent.
-    headers["Cookie"] = generate_cookie(cookies.get("nfvdid", NFVDID_VALUE), flwssn)
+
+    # 1) Preferred: Playwright harvests fresh session cookies from the real
+    #    Netflix homepage (same flow as the updated standalone example).
+    cookie_str = None
+    if _playwright_enabled():
+        try:
+            harvested = await _harvest_real_cookie(nfvdid)
+            if harvested:
+                if f"flwssn={flwssn}" not in harvested:
+                    harvested += f"; flwssn={flwssn}"
+                cookie_str = harvested
+        except Exception:
+            cookie_str = None  # graceful: fall back to the baked cookie
+
+    # 2) Fallback: classic browser-free cookie (nfvdid + flwssn).
+    if not cookie_str:
+        cookie_str = generate_cookie(nfvdid, flwssn)
+    headers["Cookie"] = cookie_str
+
     payload1, payload2 = make_payloads(email, flwssn)
 
     client_kwargs = {"timeout": 30}
@@ -270,8 +344,9 @@ def home():
     return jsonify(
         {
             "service": "netflix-trial-backend",
+            "version": "netpy-2.4",
             "health": "/healthz",
-            "send": "POST /api/send with JSON body {email[, cookie]}",
+            "send": "POST /api/send with JSON body {email}",
         }
     )
 
