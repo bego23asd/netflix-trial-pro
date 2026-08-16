@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 
 import httpx
@@ -86,17 +87,79 @@ def make_headers():
     }
 
 
-def generate_cookie(flwssn):
-    """Build the cookie header purely from known/generated values."""
-    return f"nfvdid={NFVDID_VALUE}; flwssn={flwssn}"
+def _split_cookie_line(cookies, line):
+    """Split a 'name=value; name2=value2' cookie line into the given dict."""
+    for part in line.split(";"):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        name, _, value = part.partition("=")
+        cookies[name.strip()] = value.strip()
 
 
-async def _send(email):
+def parse_cookie_input(raw):
+    """
+    Accept the cookie in any export format and turn it into a dict.
+
+    Supported inputs:
+      1. JSON array from a cookie exporter / cookie editor (EditThisCookie…):
+         [{"name": "nfvdid", "value": "BQF...%3D%3D"}]
+      2. A plain Cookie header line:
+         nfvdid=BQF...; flwssn=abc-123
+      3. A bare nfvdid value:
+         BQFmAAEB...
+
+    Returns a dict like {"nfvdid": "...", "flwssn": "..."}. Anything that
+    fails to parse falls back to the hardcoded NFVDID_VALUE constant.
+    """
+    raw = (raw or "").strip()
+    cookies = {}
+
+    if not raw:
+        pass
+    elif raw.lower().startswith("cookie:"):
+        _split_cookie_line(cookies, raw.split(":", 1)[1].strip())
+    elif raw.startswith("[") or raw.startswith("{"):
+        try:
+            items = json.loads(raw)
+            if isinstance(items, dict):
+                items = [items]
+            for item in items:
+                if isinstance(item, dict) and item.get("name"):
+                    cookies[str(item["name"])] = str(item["value"])
+        except (ValueError, TypeError):
+            pass
+    elif "=" in raw:
+        _split_cookie_line(cookies, raw)
+    else:
+        # Bare value — treat it as the nfvdid token itself.
+        cookies["nfvdid"] = raw
+
+    if "nfvdid" not in cookies:
+        cookies["nfvdid"] = NFVDID_VALUE
+
+    return cookies
+
+
+def build_cookie_header(cookies, flwssn):
+    """
+    Merge the injected cookies with a fresh flwssn and output the Cookie
+    header, exactly like a cookie editor would pin values into the request.
+    """
+    merged = dict(cookies)
+    merged.setdefault("flwssn", flwssn)
+    return "; ".join(f"{name}={value}" for name, value in merged.items())
+
+
+async def _send(email, cookie_input=None):
     """Run the two GraphQL posts. Returns (ok, message)."""
-    flwssn = str(uuid.uuid4())
-    cookie = generate_cookie(flwssn)
+    cookies = parse_cookie_input(cookie_input)
+    # Use the pasted flwssn when present so the cookie and the GraphQL
+    # variables always describe the same guest flow session.
+    flwssn = cookies.get("flwssn") or str(uuid.uuid4())
     headers = make_headers()
-    headers["Cookie"] = cookie
+    # Inject the pasted cookie (cookie-editor-style) into every request.
+    headers["Cookie"] = build_cookie_header(cookies, flwssn)
     payload1, payload2 = make_payloads(email, flwssn)
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -110,12 +173,22 @@ async def _send(email):
         return False, f"Second request failed (HTTP {resp2.status_code})."
 
 
-def send_trial(email):
+def send_trial(email, cookie_input=None):
     """Synchronous wrapper so the web layer can call it easily."""
     email = (email or "").strip()
     if not email or "@" not in email:
         return False, "Invalid email address provided."
-    return asyncio.run(_send(email))
+
+    # Normalize/validate the injected cookie early for a friendlier error.
+    cookies = parse_cookie_input(cookie_input)
+    nfvdid = cookies.get("nfvdid", "")
+    if not nfvdid:
+        return False, "nfvdid cookie is missing — paste a valid line or JSON."
+
+    try:
+        return asyncio.run(_send(email, cookie_input))
+    except Exception as exc:  # network/config errors surface to the UI
+        return False, f"Error while sending trial: {exc}"
 
 
 if __name__ == "__main__":
